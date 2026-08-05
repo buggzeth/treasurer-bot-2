@@ -3,7 +3,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { config } from "./config";
 
-// Raw JSON Schema (No Zod required)
 const receiptJsonSchema = {
     type: "object",
     properties: {
@@ -21,11 +20,11 @@ export async function processReceiptImage(base64Image: string, mimeType: string)
     const prompt = `
     Analyze this receipt image. Extract the merchant name, date, total amount, tax amount, and currency. 
     Categorize the expense appropriately based on the merchant. 
-    Ensure the date is formatted as YYYY-MM-DD.
+    Ensure the date is strictly formatted as YYYY-MM-DD.
     `;
 
-    // Shuffle keys to prevent concurrent serverless functions from defaulting to the same key first
     const availableKeys = [...config.geminiApiKeys].sort(() => Math.random() - 0.5);
+    let rawJsonText = null;
 
     for (let i = 0; i < availableKeys.length; i++) {
         const apiKey = availableKeys[i];
@@ -45,28 +44,46 @@ export async function processReceiptImage(base64Image: string, mimeType: string)
                 },
             });
 
-            if (!interaction.output_text) {
-                throw new Error("Gemini returned an empty response.");
-            }
-
-            return JSON.parse(interaction.output_text);
+            if (!interaction.output_text) throw new Error("Gemini returned an empty response.");
+            
+            rawJsonText = interaction.output_text;
+            break; // Success! Break out of the loop.
 
         } catch (error: any) {
             const errorMessage = error?.message?.toLowerCase() || "";
             const status = error?.status;
             
-            // If it's a rate limit or quota issue, we retry with the next key in the array
             if (status === 429 || errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('rate limit')) {
                 console.warn(`[Gemini] Key hit rate limit. Retrying with key ${i + 2} of ${availableKeys.length}...`);
                 continue; 
             }
             
-            // If it's the last key in the array, or a different error (e.g., bad image format), throw it entirely.
-            if (i === availableKeys.length - 1) {
-                throw error;
-            }
+            if (i === availableKeys.length - 1) throw error;
         }
     }
 
-    throw new Error("All Gemini API keys are currently rate limited or exhausted.");
+    if (!rawJsonText) {
+        throw new Error("All Gemini API keys failed or were exhausted.");
+    }
+
+    // --- SANITIZATION LAYER ---
+    const parsedData = JSON.parse(rawJsonText);
+
+    // 1. Sanitize Date (Must be YYYY-MM-DD for PostgreSQL)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!parsedData.transaction_date || !dateRegex.test(parsedData.transaction_date)) {
+        // Fallback to today's date if Gemini fails to find one
+        parsedData.transaction_date = new Date().toISOString().split('T')[0];
+    }
+
+    // 2. Sanitize Numbers (Ensure they are actually numbers, fallback to 0)
+    parsedData.total_amount = Number(parsedData.total_amount) || 0;
+    parsedData.tax_amount = Number(parsedData.tax_amount) || 0;
+
+    // 3. Sanitize Strings
+    parsedData.merchant_name = parsedData.merchant_name || "Unknown Merchant";
+    parsedData.currency = (parsedData.currency || "USD").toUpperCase().substring(0, 3);
+    parsedData.category = parsedData.category || "Miscellaneous";
+
+    return parsedData;
 }
