@@ -1,3 +1,5 @@
+// --- START OF FILE bot.ts ---
+
 import { Telegraf, Markup } from 'telegraf';
 import { config } from './config';
 import { uploadReceiptImage, insertPendingExpense, updateExpenseStatus } from './supabase';
@@ -21,45 +23,62 @@ bot.start((ctx) => {
 
 bot.on('photo', async (ctx) => {
     try {
-        const loadingMsg = await ctx.reply("⏳ Processing via Gemini 3.6 Flash...");
+        // Acknowledge receipt to user immediately
+        const loadingMsg = await ctx.reply("⏳ Processing in background. You can close the app...");
 
-        // 1. Get Image from Telegram
-        const photo = ctx.message.photo[ctx.message.photo.length - 1];
-        const fileLink = await ctx.telegram.getFileLink(photo.file_id);
-        const response = await fetch(fileLink.href);
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
+        // Define the heavy lifting as a separate background task
+        const processTask = async () => {
+            try {
+                const photo = ctx.message.photo[ctx.message.photo.length - 1];
+                const fileLink = await ctx.telegram.getFileLink(photo.file_id);
+                const response = await fetch(fileLink.href);
+                const arrayBuffer = await response.arrayBuffer();
+                const buffer = Buffer.from(arrayBuffer);
 
-        // 2. Upload to Supabase Storage
-        const imageUrl = await uploadReceiptImage(buffer, 'image/jpeg', 'jpg');
+                const imageUrl = await uploadReceiptImage(buffer, 'image/jpeg', 'jpg');
+                const base64Image = buffer.toString('base64');
+                
+                const extractedData = await processReceiptImage(base64Image, 'image/jpeg');
+                const rowId = await insertPendingExpense(extractedData, ctx.from.id, imageUrl);
 
-        // 3. Process with Gemini
-        const base64Image = buffer.toString('base64');
-        const extractedData = await processReceiptImage(base64Image, 'image/jpeg');
+                const text = 
+                    `🧾 *Receipt Parsed*\n\n` +
+                    `*Merchant:* ${extractedData.merchant_name}\n` +
+                    `*Date:* ${extractedData.transaction_date}\n` +
+                    `*Total:* ${extractedData.total_amount} ${extractedData.currency}\n` +
+                    `*Category:* ${extractedData.category}\n\n` +
+                    `Save to database?`;
 
-        // 4. Save to Supabase DB as 'pending'
-        const rowId = await insertPendingExpense(extractedData, ctx.from.id, imageUrl);
+                await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, text, {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        Markup.button.callback('✅ Approve', `approve_${rowId}`),
+                        Markup.button.callback('❌ Reject', `reject_${rowId}`)
+                    ])
+                });
+            } catch (error: any) {
+                console.error("Background Processing Error:", error);
+                await ctx.telegram.editMessageText(
+                    ctx.chat.id, 
+                    loadingMsg.message_id, 
+                    undefined, 
+                    `❌ Error processing the receipt. Reason: ${error.message || "Unknown error"}`
+                );
+            }
+        };
 
-        // 5. Ask for human verification
-        const text = 
-            `🧾 *Receipt Parsed*\n\n` +
-            `*Merchant:* ${extractedData.merchant_name}\n` +
-            `*Date:* ${extractedData.transaction_date}\n` +
-            `*Total:* ${extractedData.total_amount} ${extractedData.currency}\n` +
-            `*Category:* ${extractedData.category}\n\n` +
-            `Save to database?`;
-
-        await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, text, {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-                Markup.button.callback('✅ Approve', `approve_${rowId}`),
-                Markup.button.callback('❌ Reject', `reject_${rowId}`)
-            ])
-        });
+        // Tap into the Next.js `waitUntil` context we passed from route.ts
+        const update: any = ctx.update;
+        if (update.waitUntil) {
+            update.waitUntil(processTask());
+        } else {
+            // Fallback for local development if Next.js context isn't passed
+            processTask().catch(console.error);
+        }
 
     } catch (error) {
-        console.error(error);
-        ctx.reply("❌ Error processing the receipt.");
+        console.error("Initial handler error:", error);
+        ctx.reply("❌ Error starting the process.");
     }
 });
 

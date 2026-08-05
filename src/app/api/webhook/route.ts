@@ -1,15 +1,25 @@
-import { NextResponse } from 'next/server';
-import { bot } from '@/lib/bot'; // Next.js App Router allows beautiful absolute imports
+// --- START OF FILE route.ts ---
 
-// Telegram sends webhooks as POST requests
-export async function POST(request: Request) {
+import { NextRequest, NextResponse } from 'next/server';
+import { bot } from '@/lib/bot';
+
+// Allow Vercel to keep this serverless instance alive up to its max Hobby limit.
+export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
+
+export async function POST(request: NextRequest, context: any) {
     try {
-        // App router parses JSON natively via Web Standards
         const update = await request.json();
 
-        // Feed the update directly to our Telegraf instance
+        // Inject standard Vercel background execution context into the update object 
+        // This stops Next.js/Vercel from killing the instance the moment NextResponse is returned
+        if (context && typeof context.waitUntil === 'function') {
+            update.waitUntil = context.waitUntil.bind(context);
+        }
+
         await bot.handleUpdate(update);
 
+        // Telegram webhook is successfully acknowledged instantly.
         return NextResponse.json({ status: 'Success' }, { status: 200 });
     } catch (error) {
         console.error('Webhook Error:', error);
@@ -17,7 +27,6 @@ export async function POST(request: Request) {
     }
 }
 
-// A simple GET request so you can visit the URL in your browser to check if it's alive
 export async function GET() {
     return new NextResponse('🤖 Treasurer Webhook is active.', {
         status: 200,
