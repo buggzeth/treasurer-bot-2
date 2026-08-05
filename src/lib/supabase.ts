@@ -1,3 +1,5 @@
+// --- START OF FILE supabase.ts ---
+
 import { createClient } from '@supabase/supabase-js';
 import { config } from './config';
 
@@ -49,6 +51,33 @@ export async function updateExpenseStatus(id: string, status: 'approved' | 'reje
         .from('expenses')
         .update({ status })
         .eq('id', id);
+
+    if (error) throw error;
+}
+
+// === NEW DYNAMIC WHITELIST FUNCTIONS ===
+
+export async function isUserAllowed(telegramId: number): Promise<boolean> {
+    const { data, error } = await supabase
+        .from('allowed_users')
+        .select('telegram_id')
+        .eq('telegram_id', telegramId)
+        .maybeSingle();
+    
+    if (error) {
+        console.error("Supabase Error checking allowed user:", error);
+        return false;
+    }
+    return !!data; // Returns true if the user exists in the database
+}
+
+export async function addAllowedUser(telegramId: number, addedBy: number) {
+    const { error } = await supabase
+        .from('allowed_users')
+        .upsert(
+            [{ telegram_id: telegramId, added_by: addedBy }],
+            { onConflict: 'telegram_id' } // Fails silently/updates if user already exists
+        );
 
     if (error) throw error;
 }

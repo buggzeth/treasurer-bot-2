@@ -3,31 +3,93 @@
 import { Telegraf, Markup } from 'telegraf';
 import { waitUntil } from '@vercel/functions';
 import { config } from './config';
-import { uploadReceiptImage, insertPendingExpense, updateExpenseStatus } from './supabase';
+import { 
+    uploadReceiptImage, 
+    insertPendingExpense, 
+    updateExpenseStatus, 
+    isUserAllowed, 
+    addAllowedUser 
+} from './supabase';
 import { processReceiptImage } from './gemini';
 
 export const bot = new Telegraf(config.telegramToken);
 
-// Middleware: Ignore anyone not in ALLOWED_TELEGRAM_USERS
+// Middleware: Check both Admin (.env) and Dynamic Whitelist (Supabase)
 bot.use(async (ctx, next) => {
-    if (ctx.from && config.allowedUsers.includes(ctx.from.id)) {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    // 1. Are they listed in the environment variables? (Super Admins)
+    const isSuperAdmin = config.allowedUsers.includes(userId);
+    if (isSuperAdmin) {
         return next();
     }
+
+    // 2. Are they dynamically whitelisted in Supabase? (Standard Users)
+    const isWhitelisted = await isUserAllowed(userId);
+    if (isWhitelisted) {
+        return next();
+    }
+
+    // Not authorized
     if (ctx.chat) {
-        await ctx.reply("⛔ Unauthorized access.");
+        await ctx.reply("⛔ Unauthorized access. You are not whitelisted.");
     }
 });
 
 bot.start((ctx) => {
-    ctx.reply("👋 AI Treasurer is online. Send me a receipt image.");
+    const isSuperAdmin = config.allowedUsers.includes(ctx.from.id);
+
+    if (isSuperAdmin) {
+        // Super Admins get the special custom keyboard to pick contacts
+        ctx.reply(
+            "👋 AI Treasurer is online.\n\nSince you are an Admin, you can process receipts OR whitelist new users from your contacts using the button below.",
+            Markup.keyboard([
+                [{ 
+                    text: '➕ Whitelist New User', 
+                    request_users: { request_id: 1, user_is_bot: false } // Opens contact picker
+                }]
+            ]).resize()
+        );
+    } else {
+        // Standard whitelisted users just see a normal welcome
+        ctx.reply("👋 AI Treasurer is online. Send me a receipt image.", Markup.removeKeyboard());
+    }
+});
+
+// Listener for when a Super Admin selects a contact to whitelist
+bot.on('message', async (ctx, next) => {
+    const msg = ctx.message as any;
+    const isSuperAdmin = config.allowedUsers.includes(ctx.from.id);
+
+    // Telegram sends a 'users_shared' or 'user_shared' event back with the ID(s)
+    if (msg.users_shared || msg.user_shared) {
+        if (!isSuperAdmin) {
+            return ctx.reply("⛔ Only admins can whitelist new users.");
+        }
+
+        try {
+            // Unify response for both Telegram Bot API 7.0+ and 6.5
+            const sharedUsers = msg.users_shared?.users || [{ user_id: msg.user_shared.user_id }];
+            
+            for (const user of sharedUsers) {
+                await addAllowedUser(user.user_id, ctx.from.id);
+            }
+            
+            return ctx.reply(`✅ Successfully whitelisted ${sharedUsers.length} user(s). They can now message the bot directly!`);
+        } catch (error) {
+            console.error("Error adding allowed user:", error);
+            return ctx.reply("❌ Database error while trying to whitelist user.");
+        }
+    }
+    
+    return next();
 });
 
 bot.on('photo', async (ctx) => {
     try {
-        // Acknowledge immediately so the user knows it's working
         const loadingMsg = await ctx.reply("⏳ Processing in background. You can close the app...");
 
-        // Define the heavy lifting
         const processTask = async () => {
             try {
                 const photo = ctx.message.photo[ctx.message.photo.length - 1];
@@ -50,7 +112,6 @@ bot.on('photo', async (ctx) => {
                     `*Category:* ${extractedData.category}\n\n` +
                     `Save to database?`;
 
-                // Update the loading message with the results
                 await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, text, {
                     parse_mode: 'Markdown',
                     ...Markup.inlineKeyboard([
@@ -69,8 +130,6 @@ bot.on('photo', async (ctx) => {
             }
         };
 
-        // Tell Vercel to keep this function alive until processTask is done
-        // (Up to the 60 seconds defined in maxDuration)
         waitUntil(processTask());
 
     } catch (error) {
