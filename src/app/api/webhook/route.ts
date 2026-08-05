@@ -1,25 +1,20 @@
 // --- START OF FILE route.ts ---
 
 import { NextRequest, NextResponse } from 'next/server';
-import { bot } from '@/lib/bot';
+import { bot } from '@/lib/bot'; 
 
-// Allow Vercel to keep this serverless instance alive up to its max Hobby limit.
+// Force Vercel to allow up to 60 seconds (Hobby Tier Maximum)
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
-export async function POST(request: NextRequest, context: any) {
+export async function POST(request: NextRequest) {
     try {
         const update = await request.json();
 
-        // Inject standard Vercel background execution context into the update object 
-        // This stops Next.js/Vercel from killing the instance the moment NextResponse is returned
-        if (context && typeof context.waitUntil === 'function') {
-            update.waitUntil = context.waitUntil.bind(context);
-        }
-
+        // Feed the update directly to Telegraf
         await bot.handleUpdate(update);
 
-        // Telegram webhook is successfully acknowledged instantly.
+        // Instantly acknowledge Telegram so it doesn't retry the webhook
         return NextResponse.json({ status: 'Success' }, { status: 200 });
     } catch (error) {
         console.error('Webhook Error:', error);

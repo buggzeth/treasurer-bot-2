@@ -1,6 +1,7 @@
 // --- START OF FILE bot.ts ---
 
 import { Telegraf, Markup } from 'telegraf';
+import { waitUntil } from '@vercel/functions';
 import { config } from './config';
 import { uploadReceiptImage, insertPendingExpense, updateExpenseStatus } from './supabase';
 import { processReceiptImage } from './gemini';
@@ -23,10 +24,10 @@ bot.start((ctx) => {
 
 bot.on('photo', async (ctx) => {
     try {
-        // Acknowledge receipt to user immediately
+        // Acknowledge immediately so the user knows it's working
         const loadingMsg = await ctx.reply("⏳ Processing in background. You can close the app...");
 
-        // Define the heavy lifting as a separate background task
+        // Define the heavy lifting
         const processTask = async () => {
             try {
                 const photo = ctx.message.photo[ctx.message.photo.length - 1];
@@ -49,6 +50,7 @@ bot.on('photo', async (ctx) => {
                     `*Category:* ${extractedData.category}\n\n` +
                     `Save to database?`;
 
+                // Update the loading message with the results
                 await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, text, {
                     parse_mode: 'Markdown',
                     ...Markup.inlineKeyboard([
@@ -67,14 +69,9 @@ bot.on('photo', async (ctx) => {
             }
         };
 
-        // Tap into the Next.js `waitUntil` context we passed from route.ts
-        const update: any = ctx.update;
-        if (update.waitUntil) {
-            update.waitUntil(processTask());
-        } else {
-            // Fallback for local development if Next.js context isn't passed
-            processTask().catch(console.error);
-        }
+        // Tell Vercel to keep this function alive until processTask is done
+        // (Up to the 60 seconds defined in maxDuration)
+        waitUntil(processTask());
 
     } catch (error) {
         console.error("Initial handler error:", error);
