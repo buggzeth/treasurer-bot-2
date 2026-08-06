@@ -81,3 +81,14 @@ export async function addAllowedUser(telegramId: number, addedBy: number) {
 
     if (error) throw error;
 }
+
+export async function getApprovedExpenses() {
+    const { data, error } = await supabase
+        .from('expenses')
+        .select('*')
+        .eq('status', 'approved') // Using 'approved' as set by your inline keyboard action
+        .order('transaction_date', { ascending: false });
+
+    if (error) throw error;
+    return data || [];
+}

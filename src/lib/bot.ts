@@ -8,7 +8,8 @@ import {
     insertPendingExpense, 
     updateExpenseStatus, 
     isUserAllowed, 
-    addAllowedUser 
+    addAllowedUser,
+    getApprovedExpenses
 } from './supabase';
 import { processReceiptImage } from './gemini';
 
@@ -41,19 +42,90 @@ bot.start((ctx) => {
     const isSuperAdmin = config.allowedUsers.includes(ctx.from.id);
 
     if (isSuperAdmin) {
-        // Super Admins get the special custom keyboard to pick contacts
+        // Super Admins get the special custom keyboard to pick contacts and export data
         ctx.reply(
-            "👋 AI Treasurer is online.\n\nSince you are an Admin, you can process receipts OR whitelist new users from your contacts using the button below.",
+            "👋 AI Treasurer is online.\n\nSince you are an Admin, you can process receipts, whitelist new users, or export data using the buttons below.",
             Markup.keyboard([
                 [{ 
                     text: '➕ Whitelist New User', 
                     request_users: { request_id: 1, user_is_bot: false } // Opens contact picker
+                }],
+                [{ 
+                    text: '📥 Export Approved Expenses' 
                 }]
             ]).resize()
         );
     } else {
         // Standard whitelisted users just see a normal welcome
         ctx.reply("👋 AI Treasurer is online. Send me a receipt image.", Markup.removeKeyboard());
+    }
+});
+
+// Listener for the Export Data button
+bot.hears('📥 Export Approved Expenses', async (ctx) => {
+    const isSuperAdmin = config.allowedUsers.includes(ctx.from.id);
+    if (!isSuperAdmin) {
+        return ctx.reply("⛔ Only admins can export expenses.");
+    }
+
+    const loadingMsg = await ctx.reply("⏳ Fetching data and generating CSV...");
+
+    try {
+        const expenses = await getApprovedExpenses();
+        
+        if (expenses.length === 0) {
+            return ctx.telegram.editMessageText(
+                ctx.chat.id, 
+                loadingMsg.message_id, 
+                undefined, 
+                "ℹ️ No approved expenses found."
+            );
+        }
+
+        // 1. Define CSV Headers matching your schema
+        const headers = [
+            'id', 'created_at', 'telegram_user_id', 'merchant_name', 
+            'transaction_date', 'total_amount', 'tax_amount', 
+            'currency', 'category', 'status', 'receipt_image_url'
+        ];
+
+        // 2. Map data to CSV rows, safely escaping commas and quotes
+        const csvRows = expenses.map(row => {
+            return headers.map(header => {
+                let val = row[header];
+                if (val === null || val === undefined) val = '';
+                
+                const str = String(val);
+                // Escape quotes and wrap in quotes if the string contains a comma, newline, or quote
+                if (str.includes(',') || str.includes('\n') || str.includes('"')) {
+                    return `"${str.replace(/"/g, '""')}"`;
+                }
+                return str;
+            }).join(',');
+        });
+
+        // 3. Combine headers and rows
+        const csvString = [headers.join(','), ...csvRows].join('\n');
+        
+        // 4. Convert to Buffer (Telegraf accepts buffers for document uploads)
+        const buffer = Buffer.from(csvString, 'utf-8');
+        const dateStr = new Date().toISOString().split('T')[0];
+
+        // 5. Send Document & Clean up loading message
+        await ctx.replyWithDocument(
+            { source: buffer, filename: `approved_expenses_${dateStr}.csv` },
+            { caption: `📊 Here is your export of ${expenses.length} approved expenses.` }
+        );
+        await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+
+    } catch (error) {
+        console.error("Export Error:", error);
+        await ctx.telegram.editMessageText(
+            ctx.chat.id, 
+            loadingMsg.message_id, 
+            undefined, 
+            "❌ Database error while generating CSV."
+        );
     }
 });
 
